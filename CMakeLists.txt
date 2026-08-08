@@ -40,11 +40,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/strip.cmake)
 # stop symbols leaking
 # TODO: Fix
 # add_link_options(-Wl, --exclude-libs, ALL)
+string(REGEX REPLACE "[-+].*$" "" NUMERIC_PACKAGE_VERSION "${PACKAGE_VERSION}")
 project( AccSaberQLite
-        VERSION ${PACKAGE_VERSION})
+        VERSION ${NUMERIC_PACKAGE_VERSION})
 
 add_compile_definitions(MOD_ID="${CMAKE_PROJECT_NAME}")
-add_compile_definitions(VERSION="${CMAKE_PROJECT_VERSION}")
+add_compile_definitions(VERSION="${PACKAGE_VERSION}")
 
 add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=AccSaberQLite")
 
