@@ -5,7 +5,6 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
-#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -32,9 +31,6 @@ namespace AccSaberQLite::API
     {
 
         constexpr std::string_view BASE_URL = "https://api.accsaber.com/v1";
-        constexpr char const *PAIRING_DIR = "/sdcard/ModData/com.beatgames.beatsaber/Mods/AccSaberQLite";
-        constexpr char const *PAIRING_FILE =
-            "/sdcard/ModData/com.beatgames.beatsaber/Mods/AccSaberQLite/pairing_code.txt";
         constexpr char const *SESSION_FILE =
             "/sdcard/ModData/com.beatgames.beatsaber/Mods/AccSaberQLite/accsaber_session_DO_NOT_SHARE.txt";
 
@@ -370,43 +366,6 @@ namespace AccSaberQLite::API
             PaperLogger.info("Imported baked session credential from installer");
         }
 
-        bool TryRedeemPairingFile()
-        {
-            std::error_code ec;
-            std::filesystem::create_directories(PAIRING_DIR, ec);
-
-            std::ifstream file(PAIRING_FILE);
-            if (!file.is_open())
-                return false;
-            std::string code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            file.close();
-
-            code = TrimCopy(std::move(code));
-            if (code.empty())
-                return false;
-
-            PaperLogger.info("Redeeming pairing code found at {}", PAIRING_FILE);
-            loginInFlight = true;
-            loginStartedAt = NowUnix();
-            AuthRequest("/auth/pair", "{\"code\":" + JsonEscape(code) + "}", "Quest pairing",
-                        [](bool ok)
-                        {
-                            loginInFlight = false;
-                            if (ok)
-                            {
-                                std::remove(PAIRING_FILE);
-                                PaperLogger.info("Quest pairing complete, session stored");
-                            }
-                            else
-                            {
-                                PaperLogger.error(
-                                    "Pairing failed; generate a fresh code on accsaber.com and replace {}",
-                                    PAIRING_FILE);
-                            }
-                        });
-            return true;
-        }
-
         std::string SerializePayload(ScorePayload const &payload, std::string const &nonce)
         {
             rapidjson::StringBuffer buffer;
@@ -539,16 +498,11 @@ namespace AccSaberQLite::API
             RefreshSession([](bool ok)
                            {
                 loginInFlight = false;
-                if (!ok) PaperLogger.warn("Stored session invalid; install a fresh personalized download or drop a pairing code to relink"); });
+                if (!ok) PaperLogger.warn("Stored session invalid; download a fresh personalized mod from accsaber.com/quest to relink"); });
             return;
         }
 
-        if (TryRedeemPairingFile())
-            return;
-
-        PaperLogger.warn(
-            "Not linked to AccSaber. Download a personalized mod from accsaber.com, or save a pairing code to {}",
-            PAIRING_FILE);
+        PaperLogger.warn("Not linked to an account in AccSaber. Download a personalized mod from accsaber.com/quest.");
     }
 
     void SubmitScore(ScorePayload payload, std::function<void(bool)> onDone)
