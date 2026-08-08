@@ -1,56 +1,41 @@
-name: NDK build
+name: Build and release
 
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*"
     branches:
-      - 'master'
       - 'main'
-      - 'dev/*'
-      - 'feat/*'
-      - 'fix/*'
     paths-ignore:
-      - '**.yml'
-      - '!.github/workflows/build-ndk.yml'
-      - '**.json'
-      - '!qpm.json'
-      - '!qpm.shared.json'
-      - '!mod.template.json'
-      - '**.txt'
-      - '!CMakeLists.txt'
-      - '**.ps1'
-      - '!build.ps1'
-      - '!createqmod.ps1'
       - '**.md'
       - '.gitignore'
+      - '.vscode/**'
   pull_request:
     branches:
-        - 'master'
-        - 'main'
-        - 'dev/*'
-        - 'feat/*'
-        - 'fix/*'
+      - 'main'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-    module_id: "AccSaberQLite"
-    qmod_name: "AccSaber QLite"
+  module_id: "AccSaberQLite"
+  qmod_name: "AccSaber-Lite"
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       name: Checkout
       with:
-        submodules: true
-        lfs: true
+        fetch-depth: 0
 
     - uses: seanmiddleditch/gha-setup-ninja@v3
 
-    # Use canary NDK to avoid lesser known compile bugs
     - name: Setup canary NDK
       id: setup-ndk
       uses: ./.github/actions/canary-ndk
@@ -60,13 +45,24 @@ jobs:
         echo ${{ steps.setup-ndk.outputs.ndk-path }} > ${GITHUB_WORKSPACE}/ndkpath.txt
         cat ${GITHUB_WORKSPACE}/ndkpath.txt
 
-    # get version from pushed tag
-    - name: Extract version
-      if: startsWith(github.ref, 'refs/tags/v')
+    - name: Compute next version
       id: version
       run: |
-        echo "TAG=${GITHUB_REF#refs/tags/}" >> ${GITHUB_OUTPUT}
-        echo "VERSION=${GITHUB_REF#refs/tags/v}" >> ${GITHUB_OUTPUT}
+        latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
+        if [ -z "$latest" ]; then
+          next="v0.0.1"
+        else
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          next="v${major}.${minor}.$((patch + 1))"
+        fi
+        echo "TAG=${next}" >> ${GITHUB_OUTPUT}
+        echo "VERSION=${next#v}" >> ${GITHUB_OUTPUT}
+        echo "Next release: ${next}"
+
+    - name: Stamp version
+      run: |
+        jq --arg v "${{ steps.version.outputs.VERSION }}" '.version = $v | .info.version = $v' qpm.json > qpm.json.tmp
+        mv qpm.json.tmp qpm.json
 
     - name: Setup qpm
       uses: Fernthedev/qpm-action@main
@@ -99,22 +95,21 @@ jobs:
     - name: Upload qmod artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{env.qmod_name}}.qmod
+        name: ${{ env.qmod_name }}.qmod
         path: ./${{ env.qmod_name }}.qmod
         if-no-files-found: error
 
-    # if we had a tag, we should make a release
-    - name: Upload release artifacts
-      if: startsWith(github.ref, 'refs/tags/v')
-      id: upload_file_release
-      uses: softprops/action-gh-release@v0.1.15
+    - name: Create release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[no release]')
+      uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ github.event.inputs.version }}
-        draft: true
+        tag_name: ${{ steps.version.outputs.TAG }}
+        name: ${{ env.qmod_name }} ${{ steps.version.outputs.TAG }}
+        draft: false
         generate_release_notes: true
         files: |
+          ./${{ env.qmod_name }}.qmod
           ./build/${{ steps.libname.outputs.NAME }}
           ./build/debug_${{ steps.libname.outputs.NAME }}
-          ./${{ env.qmod_name }}.qmod
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

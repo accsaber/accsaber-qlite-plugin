@@ -12,7 +12,7 @@ runs:
   steps:
     - name: NDK cache
       id: cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ${HOME}/android-ndk-r27-canary/
         key: ${{ runner.os }}-ndk-r27-canary
@@ -26,7 +26,9 @@ runs:
 
     - name: Unzip ndk
       if: ${{ !steps.cache.outputs.cache-hit }}
-      run: 7z x "${HOME}/ndk.zip" -o"${HOME}/"
+      run: |
+        unzip -q "${HOME}/ndk.zip" -d "${HOME}/" || [ $? -le 1 ]
+        test -x "${HOME}/android-ndk-r27-canary/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
       shell: bash
 
     - name: Set output

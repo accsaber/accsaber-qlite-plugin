@@ -1,8 +1,13 @@
 #include "qlite/accsaber_api.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -18,12 +23,6 @@
 #include "beatsaber-hook/shared/rapidjson/include/rapidjson/stringbuffer.h"
 #include "beatsaber-hook/shared/rapidjson/include/rapidjson/writer.h"
 
-#include "custom-types/shared/delegate.hpp"
-
-#include "Oculus/Platform/Message.hpp"
-#include "Oculus/Platform/Message_1.hpp"
-#include "Oculus/Platform/Request_1.hpp"
-#include "Oculus/Platform/Users.hpp"
 #include "UnityEngine/Application.hpp"
 
 namespace AccSaberQLite::API
@@ -33,6 +32,11 @@ namespace AccSaberQLite::API
     {
 
         constexpr std::string_view BASE_URL = "https://api.accsaber.com/v1";
+        constexpr char const *PAIRING_DIR = "/sdcard/ModData/com.beatgames.beatsaber/Mods/AccSaberQLite";
+        constexpr char const *PAIRING_FILE =
+            "/sdcard/ModData/com.beatgames.beatsaber/Mods/AccSaberQLite/pairing_code.txt";
+        constexpr char const *SESSION_FILE =
+            "/sdcard/ModData/com.beatgames.beatsaber/Mods/AccSaberQLite/accsaber_session_DO_NOT_SHARE.txt";
 
         std::mutex sessionMutex;
         std::string sessionAccessToken;
@@ -335,14 +339,72 @@ namespace AccSaberQLite::API
                 onDone(ok); });
         }
 
-        void ExchangeTicket(std::string ticket, std::function<void(bool)> onDone)
+        std::string TrimCopy(std::string value)
         {
-            AuthRequest("/auth/ingame",
-                        "{\"provider\":\"oculusTicket\",\"ticket\":" + JsonEscape(ticket) + "}",
-                        "Ingame auth", [onDone = std::move(onDone)](bool ok)
+            auto notSpace = [](unsigned char c)
+            { return !std::isspace(c); };
+            value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
+            value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
+            return value;
+        }
+
+        void ImportSessionFileIfPresent()
+        {
+            std::ifstream file(SESSION_FILE);
+            if (!file.is_open())
+                return;
+            std::string token((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            file.close();
+            std::remove(SESSION_FILE);
+
+            token = TrimCopy(std::move(token));
+            if (token.empty())
+                return;
+
+            getModConfig().RefreshToken.SetValue(token);
+            {
+                std::lock_guard lock(sessionMutex);
+                sessionRefreshToken = token;
+            }
+            needsRelogin = false;
+            PaperLogger.info("Imported baked session credential from installer");
+        }
+
+        bool TryRedeemPairingFile()
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(PAIRING_DIR, ec);
+
+            std::ifstream file(PAIRING_FILE);
+            if (!file.is_open())
+                return false;
+            std::string code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            file.close();
+
+            code = TrimCopy(std::move(code));
+            if (code.empty())
+                return false;
+
+            PaperLogger.info("Redeeming pairing code found at {}", PAIRING_FILE);
+            loginInFlight = true;
+            loginStartedAt = NowUnix();
+            AuthRequest("/auth/pair", "{\"code\":" + JsonEscape(code) + "}", "Quest pairing",
+                        [](bool ok)
                         {
-                loginInFlight = false;
-                onDone(ok); });
+                            loginInFlight = false;
+                            if (ok)
+                            {
+                                std::remove(PAIRING_FILE);
+                                PaperLogger.info("Quest pairing complete, session stored");
+                            }
+                            else
+                            {
+                                PaperLogger.error(
+                                    "Pairing failed; generate a fresh code on accsaber.com and replace {}",
+                                    PAIRING_FILE);
+                            }
+                        });
+            return true;
         }
 
         std::string SerializePayload(ScorePayload const &payload, std::string const &nonce)
@@ -463,6 +525,8 @@ namespace AccSaberQLite::API
         if (loginInFlight && NowUnix() - loginStartedAt < LOGIN_STALL_SECONDS)
             return;
 
+        ImportSessionFileIfPresent();
+
         std::string storedRefresh = getModConfig().RefreshToken.GetValue();
         if (!storedRefresh.empty() && !needsRelogin)
         {
@@ -470,51 +534,21 @@ namespace AccSaberQLite::API
                 std::lock_guard lock(sessionMutex);
                 sessionRefreshToken = storedRefresh;
             }
-        RefreshSession([](bool ok)
-                        {
-        if (!ok) PaperLogger.warn("Stored session invalid, full login on next menu load"); });
-        return;
-    }
-
-    BeginLoginFromMainThread([](bool ok)
-                                {
-        if (!ok) PaperLogger.error("AccSaber login failed"); });
-    }
-
-    void BeginLoginFromMainThread(std::function<void(bool)> onDone)
-    {
-        long long now = NowUnix();
-        if (loginInFlight.exchange(true) && now - loginStartedAt < LOGIN_STALL_SECONDS)
-        {
-            onDone(false);
+            loginInFlight = true;
+            loginStartedAt = NowUnix();
+            RefreshSession([](bool ok)
+                           {
+                loginInFlight = false;
+                if (!ok) PaperLogger.warn("Stored session invalid; install a fresh personalized download or drop a pairing code to relink"); });
             return;
         }
-        loginStartedAt = now;
-        PaperLogger.info("Requesting Oculus platform ticket...");
 
-        auto onDonePtr = std::make_shared<std::function<void(bool)>>(std::move(onDone));
-        auto callback = custom_types::MakeDelegate<Oculus::Platform::Message_1_Callback<StringW> *>(
-            std::function<void(Oculus::Platform::Message_1<StringW> *)>(
-                [onDonePtr](Oculus::Platform::Message_1<StringW> *message)
-                {
-                    if (!message || message->IsError)
-                    {
-                        PaperLogger.error("Oculus ticket request failed");
-                        loginInFlight = false;
-                        (*onDonePtr)(false);
-                        return;
-                    }
-                    std::string ticket = static_cast<std::string>(message->get_Data());
-                    if (ticket.empty())
-                    {
-                        PaperLogger.error("Oculus ticket was empty");
-                        loginInFlight = false;
-                        (*onDonePtr)(false);
-                        return;
-                    }
-                    ExchangeTicket(std::move(ticket), *onDonePtr);
-                }));
-        Oculus::Platform::Users::GetAccessToken()->OnComplete(callback);
+        if (TryRedeemPairingFile())
+            return;
+
+        PaperLogger.warn(
+            "Not linked to AccSaber. Download a personalized mod from accsaber.com, or save a pairing code to {}",
+            PAIRING_FILE);
     }
 
     void SubmitScore(ScorePayload payload, std::function<void(bool)> onDone)

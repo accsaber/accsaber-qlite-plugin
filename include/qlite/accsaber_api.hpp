@@ -26,7 +26,6 @@ struct ScorePayload {
 
 bool HasSession();
 void EnsureSessionFromMainThread();
-void BeginLoginFromMainThread(std::function<void(bool)> onDone);
 void SubmitScore(ScorePayload payload, std::function<void(bool)> onDone);
 
 void ComputeModifierMultiplier(std::vector<std::string> codes, std::function<void(std::optional<double>)> onDone);

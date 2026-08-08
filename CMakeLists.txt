@@ -46,6 +46,8 @@ project( AccSaberQLite
 add_compile_definitions(MOD_ID="${CMAKE_PROJECT_NAME}")
 add_compile_definitions(VERSION="${CMAKE_PROJECT_VERSION}")
 
+add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=AccSaberQLite")
+
 # Set COMPILE_ID for qpm purposes
 set(COMPILE_ID ${CMAKE_PROJECT_NAME})
 
