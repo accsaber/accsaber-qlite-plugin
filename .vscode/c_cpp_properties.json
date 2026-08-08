@@ -1,0 +1,29 @@
+{
+  "configurations": [
+    {
+      "defines": [
+        "MOD_ID=\"AccSaberQLite\"",
+        "VERSION=\"0.1.0\"",
+        "__GNUC__",
+        "__aarch64__"
+      ],
+      "includePath": [
+        "${workspaceFolder}/extern/includes/libil2cpp/il2cpp/libil2cpp",
+        "${workspaceFolder}/extern/includes/bs-cordl/include",
+        "${workspaceFolder}/extern/includes",
+        "${workspaceFolder}/include",
+        "${workspaceFolder}/shared",
+        "${workspaceFolder}",
+        "${default}"
+      ],
+      "name": "Quest",
+      "cStandard": "c11",
+      "cppStandard": "c++20",
+      "compilerPath": "C:/Users/rodri/AppData/Roaming/QPM-RS/ndk/27.3.13750724+preview-0/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe",
+      "compilerArgs": ["-target", "aarch64-linux-android24", "-fdeclspec"],
+      "intelliSenseMode": "android-clang-arm64",
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json"
+    }
+  ],
+  "version": 4
+}
