@@ -47,17 +47,28 @@ jobs:
 
     - name: Compute next version
       id: version
+      env:
+        COMMIT_MSG: ${{ github.event.head_commit.message }}
       run: |
+        bump=none
+        case "$COMMIT_MSG" in
+          *"[MAJOR]"*) bump=major ;;
+          *"[MINOR]"*) bump=minor ;;
+          *"[RELEASE]"*) bump=patch ;;
+        esac
         latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
-        if [ -z "$latest" ]; then
-          next="v0.0.1"
-        else
-          IFS=. read -r major minor patch <<< "${latest#v}"
-          next="v${major}.${minor}.$((patch + 1))"
-        fi
+        [ -z "$latest" ] && latest="v0.0.0"
+        IFS=. read -r major minor patch <<< "${latest#v}"
+        case "$bump" in
+          major) next="v$((major + 1)).0.0" ;;
+          minor) next="v${major}.$((minor + 1)).0" ;;
+          patch) next="v${major}.${minor}.$((patch + 1))" ;;
+          none)  next="v${major}.${minor}.${patch}-dev" ;;
+        esac
+        echo "BUMP=${bump}" >> ${GITHUB_OUTPUT}
         echo "TAG=${next}" >> ${GITHUB_OUTPUT}
         echo "VERSION=${next#v}" >> ${GITHUB_OUTPUT}
-        echo "Next release: ${next}"
+        echo "Bump: ${bump} -> ${next}"
 
     - name: Setup qpm
       run: |
@@ -110,13 +121,15 @@ jobs:
         if-no-files-found: error
 
     - name: Create release
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[no release]')
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.version.outputs.BUMP != 'none'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.version.outputs.TAG }}
         name: ${{ env.qmod_name }} ${{ steps.version.outputs.TAG }}
         draft: false
         generate_release_notes: true
+        body: |
+          ⚠️ IMPORTANT: Do NOT download the qmod file from here. Please visit [the dedicated install wizard](https://accsaber.com/quest) to download.
         files: |
           ./${{ env.qmod_name }}.qmod
           ./build/${{ steps.libname.outputs.NAME }}
