@@ -11,7 +11,8 @@
 #include "main.hpp"
 #include "qlite/mod_config.hpp"
 
-#include "web-utils/shared/WebUtils.hpp"
+#include "libcurl/shared/curl.h"
+#include "libcurl/shared/easy.h"
 
 #include "beatsaber-hook/shared/rapidjson/include/rapidjson/document.h"
 #include "beatsaber-hook/shared/rapidjson/include/rapidjson/stringbuffer.h"
@@ -138,47 +139,93 @@ namespace AccSaberQLite::API
             return !doc.HasParseError();
         }
 
-        WebUtils::URLOptions::HeaderMap ProtocolHeaders(bool withAuth)
+        struct HttpResponse
         {
-            WebUtils::URLOptions::HeaderMap headers{
-                {"Content-Type", "application/json"},
-                {"Accept", "application/json"},
-                {"X-AccSaber-Plugin-Version", VERSION},
-                {"X-AccSaber-Game-Version", GameVersion()},
-                {"X-AccSaber-Platform", "quest"},
-                {"X-AccSaber-Installation", InstallationId()},
+            long httpCode = 0;
+            int curlCode = -1;
+            std::string body;
+
+            bool Ok() const { return curlCode == CURLE_OK && httpCode >= 200 && httpCode < 300; }
+        };
+
+        std::vector<std::string> ProtocolHeaders(bool withAuth)
+        {
+            std::vector<std::string> headers{
+                "Content-Type: application/json",
+                "Accept: application/json",
+                "X-AccSaber-Plugin-Version: " VERSION,
+                "X-AccSaber-Game-Version: " + GameVersion(),
+                "X-AccSaber-Platform: quest",
+                "X-AccSaber-Installation: " + InstallationId(),
             };
             if (withAuth)
             {
                 std::lock_guard lock(sessionMutex);
-                headers.emplace("Authorization", "Bearer " + sessionAccessToken);
+                headers.push_back("Authorization: Bearer " + sessionAccessToken);
             }
             return headers;
         }
 
-        WebUtils::URLOptions ProtocolUrl(std::string path, bool withAuth)
+        std::size_t WriteToString(void *contents, std::size_t size, std::size_t nmemb, void *out)
         {
-            WebUtils::URLOptions options(std::string(BASE_URL) + path, {}, ProtocolHeaders(withAuth));
-            options.userAgent = "AccSaberQLite/" VERSION " (BeatSaber " + GameVersion() + "; Quest)";
-            return options;
+            std::size_t length = size * nmemb;
+            static_cast<std::string *>(out)->append(static_cast<char *>(contents), length);
+            return length;
+        }
+
+        HttpResponse HttpRequest(char const *method, std::string const &path, bool withAuth,
+                                 std::string const *body)
+        {
+            HttpResponse response;
+            CURL *curl = curl_easy_init();
+            if (!curl)
+                return response;
+
+            std::string url = std::string(BASE_URL) + path;
+            std::string userAgent = "AccSaberQLite/" VERSION " (BeatSaber " + GameVersion() + "; Quest)";
+            curl_slist *headers = nullptr;
+            for (auto const &line : ProtocolHeaders(withAuth))
+            {
+                headers = curl_slist_append(headers, line.c_str());
+            }
+
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+            if (body)
+            {
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body->size()));
+            }
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToString);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
+            curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+
+            response.curlCode = static_cast<int>(curl_easy_perform(curl));
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.httpCode);
+
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            return response;
         }
 
         void PostJson(std::string path, bool withAuth, std::string body,
-                    std::function<void(WebUtils::StringResponse)> onFinished)
+                    std::function<void(HttpResponse)> onFinished)
         {
-            auto bodyPtr = std::make_shared<std::string>(std::move(body));
-            WebUtils::PostAsync<WebUtils::StringResponse>(
-                ProtocolUrl(std::move(path), withAuth),
-                std::span<uint8_t const>(reinterpret_cast<uint8_t const *>(bodyPtr->data()), bodyPtr->size()),
-                [bodyPtr, onFinished = std::move(onFinished)](WebUtils::StringResponse response)
-                {
-                    onFinished(std::move(response));
-                });
+            std::thread([path = std::move(path), withAuth, body = std::move(body),
+                        onFinished = std::move(onFinished)]
+                        { onFinished(HttpRequest("POST", path, withAuth, &body)); })
+                .detach();
         }
 
-        void GetJson(std::string path, bool withAuth, std::function<void(WebUtils::StringResponse)> onFinished)
+        void GetJson(std::string path, bool withAuth, std::function<void(HttpResponse)> onFinished)
         {
-            WebUtils::GetAsync<WebUtils::StringResponse>(ProtocolUrl(std::move(path), withAuth), std::move(onFinished));
+            std::thread([path = std::move(path), withAuth, onFinished = std::move(onFinished)]
+                        { onFinished(HttpRequest("GET", path, withAuth, nullptr)); })
+                .detach();
         }
 
         std::mutex modifierMutex;
@@ -251,17 +298,16 @@ namespace AccSaberQLite::API
                         std::function<void(bool)> onDone)
         {
             PostJson(std::move(path), false, std::move(body),
-                    [context, onDone = std::move(onDone)](WebUtils::StringResponse response)
+                    [context, onDone = std::move(onDone)](HttpResponse response)
                     {
-                        bool ok = response.IsSuccessful() && response.DataParsedSuccessful() &&
-                                StoreAuthResponse(response.GetParsedData());
+                        bool ok = response.Ok() && StoreAuthResponse(response.body);
                         if (ok)
                         {
                             PaperLogger.info("{} succeeded", context);
                         }
                         else
                         {
-                            PaperLogger.warn("{} failed (http {})", context, response.HttpCode);
+                            PaperLogger.warn("{} failed (http {})", context, response.httpCode);
                         }
                         onDone(ok);
                     });
@@ -350,15 +396,15 @@ namespace AccSaberQLite::API
             std::string body = SerializePayload(*payload, GenerateNonce());
             PostJson("/submit", true, std::move(body),
                     [payload, attemptsLeft, refreshed, onDone = std::move(onDone)](
-                        WebUtils::StringResponse response)
+                        HttpResponse response)
                     {
-                        if (response.IsSuccessful())
+                        if (response.Ok())
                         {
                             PaperLogger.info("Score submitted for difficulty {}", payload->mapDifficultyId);
                             onDone(true);
                             return;
                         }
-                        if (response.HttpCode == 401 && !refreshed)
+                        if (response.httpCode == 401 && !refreshed)
                         {
                             RefreshSession([payload, attemptsLeft, onDone](bool ok)
                                             {
@@ -370,29 +416,29 @@ namespace AccSaberQLite::API
                         } });
                             return;
                         }
-                        if (response.HttpCode == 409)
+                        if (response.httpCode == 409)
                         {
                             PaperLogger.warn("Submit rejected as duplicate nonce");
                             onDone(false);
                             return;
                         }
-                        if (response.HttpCode == 429 && attemptsLeft > 0)
+                        if (response.httpCode == 429 && attemptsLeft > 0)
                         {
                             PaperLogger.warn("Rate limited, retrying in 61s ({} attempts left)", attemptsLeft);
                             std::this_thread::sleep_for(std::chrono::seconds(61));
                             AttemptSubmit(payload, attemptsLeft - 1, refreshed, onDone);
                             return;
                         }
-                        if (response.CurlStatus != 0 && attemptsLeft > 0)
+                        if (response.curlCode != CURLE_OK && attemptsLeft > 0)
                         {
                             PaperLogger.warn("Submit network error (curl {}), retrying ({} attempts left)",
-                                            response.CurlStatus, attemptsLeft);
+                                            response.curlCode, attemptsLeft);
                             std::this_thread::sleep_for(std::chrono::seconds(2));
                             AttemptSubmit(payload, attemptsLeft - 1, refreshed, onDone);
                             return;
                         }
-                        PaperLogger.error("Submit failed (http {} curl {})", response.HttpCode,
-                                        response.CurlStatus);
+                        PaperLogger.error("Submit failed (http {} curl {})", response.httpCode,
+                                        response.curlCode);
                         onDone(false);
                     });
         }
@@ -495,16 +541,16 @@ namespace AccSaberQLite::API
             return;
         }
         GetJson("/modifiers", false,
-                [codes = std::move(codes), onDone = std::move(onDone)](WebUtils::StringResponse response)
+                [codes = std::move(codes), onDone = std::move(onDone)](HttpResponse response)
                 {
-                    if (!response.IsSuccessful() || !response.DataParsedSuccessful())
+                    if (!response.Ok())
                     {
-                        PaperLogger.error("Failed to load modifiers (http {})", response.HttpCode);
+                        PaperLogger.error("Failed to load modifiers (http {})", response.httpCode);
                         onDone(std::nullopt);
                         return;
                     }
                     rapidjson::Document doc;
-                    if (!ParseJson(response.GetParsedData(), doc) || !doc.IsArray())
+                    if (!ParseJson(response.body, doc) || !doc.IsArray())
                     {
                         onDone(std::nullopt);
                         return;
@@ -532,21 +578,21 @@ namespace AccSaberQLite::API
     {
         GetJson("/maps/hash/" + songHash, false,
                 [difficulty = std::move(difficulty), characteristic = std::move(characteristic),
-                    onDone = std::move(onDone)](WebUtils::StringResponse response)
+                    onDone = std::move(onDone)](HttpResponse response)
                 {
-                    if (response.HttpCode == 404)
+                    if (response.httpCode == 404)
                     {
                         onDone(std::nullopt);
                         return;
                     }
-                    if (!response.IsSuccessful() || !response.DataParsedSuccessful())
+                    if (!response.Ok())
                     {
-                        PaperLogger.error("Map lookup failed (http {})", response.HttpCode);
+                        PaperLogger.error("Map lookup failed (http {})", response.httpCode);
                         onDone(std::nullopt);
                         return;
                     }
                     rapidjson::Document doc;
-                    if (!ParseJson(response.GetParsedData(), doc) || !doc.IsObject() ||
+                    if (!ParseJson(response.body, doc) || !doc.IsObject() ||
                         !doc.HasMember("difficulties") || !doc["difficulties"].IsArray())
                     {
                         onDone(std::nullopt);

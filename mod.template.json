@@ -9,8 +9,8 @@
   "packageVersion": "1.40.8_7379",
   "description": "Lite AccSaber score submission for Quest",
   "dependencies": [],
-  "modFiles": ["${binary}"],
-
+  "modFiles": [],
+  "lateModFiles": ["${binary}"],
   "libraryFiles": [],
   "fileCopies": []
 }

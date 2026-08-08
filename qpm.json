@@ -56,7 +56,7 @@
     },
     {
       "id": "paper2_scotland2",
-      "versionRange": "^4.6.4",
+      "versionRange": "^4.8.0",
       "additionalData": {}
     },
     {
@@ -75,18 +75,13 @@
       "additionalData": {}
     },
     {
-      "id": "web-utils",
-      "versionRange": "^0.6.8",
-      "additionalData": {}
-    },
-    {
-      "id": "songcore",
-      "versionRange": "^1.1.24",
+      "id": "libcurl",
+      "versionRange": "=8.5.0",
       "additionalData": {}
     },
     {
       "id": "metacore",
-      "versionRange": "^1.4.0",
+      "versionRange": "^1.6.3",
       "additionalData": {}
     }
   ]
