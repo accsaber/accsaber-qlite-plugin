@@ -29,12 +29,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       name: Checkout
       with:
         fetch-depth: 0
 
-    - uses: seanmiddleditch/gha-setup-ninja@v3
+    - name: Install ninja
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build
 
     - name: Setup canary NDK
       id: setup-ndk
@@ -79,7 +80,7 @@ jobs:
         echo "${HOME}/qpm" >> ${GITHUB_PATH}
 
     - name: QPM dependency cache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.local/share/QPM-RS
         key: ${{ runner.os }}-qpm-deps-${{ hashFiles('qpm.json') }}
@@ -107,14 +108,14 @@ jobs:
         echo "NAME=${files[0]}" >> ${GITHUB_OUTPUT}
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.libname.outputs.NAME }}
         path: ./build/${{ steps.libname.outputs.NAME }}
         if-no-files-found: error
 
     - name: Upload qmod artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ env.qmod_name }}.qmod
         path: ./${{ env.qmod_name }}.qmod
@@ -122,7 +123,7 @@ jobs:
 
     - name: Create release
       if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.version.outputs.BUMP != 'none'
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ steps.version.outputs.TAG }}
         name: ${{ env.qmod_name }} ${{ steps.version.outputs.TAG }}
