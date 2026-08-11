@@ -295,7 +295,7 @@ namespace AccSaberQLite::API
         }
 
         void AuthRequest(std::string path, std::string body, char const *context,
-                        std::function<void(bool)> onDone)
+                        std::function<void(bool, long)> onDone)
         {
             PostJson(std::move(path), false, std::move(body),
                     [context, onDone = std::move(onDone)](HttpResponse response)
@@ -307,9 +307,10 @@ namespace AccSaberQLite::API
                         }
                         else
                         {
-                            PaperLogger.warn("{} failed (http {})", context, response.httpCode);
+                            PaperLogger.warn("{} failed (http {} curl {})", context, response.httpCode,
+                                                response.curlCode);
                         }
-                        onDone(ok);
+                        onDone(ok, response.httpCode);
                     });
         }
 
@@ -329,9 +330,9 @@ namespace AccSaberQLite::API
             }
 
             AuthRequest("/auth/refresh", "{\"refreshToken\":" + JsonEscape(refreshToken) + "}",
-                        "Session refresh", [onDone = std::move(onDone)](bool ok)
+                        "Session refresh", [onDone = std::move(onDone)](bool ok, long httpCode)
                         {
-                if (!ok) needsRelogin = true;
+                if (!ok && httpCode >= 400 && httpCode < 500) needsRelogin = true;
                 onDone(ok); });
         }
 
