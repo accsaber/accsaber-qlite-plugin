@@ -38,12 +38,11 @@ namespace AccSaberQLite::API
         std::string sessionAccessToken;
         std::string sessionRefreshToken;
         long long sessionExpiresAtUnix = 0;
-        std::atomic<bool> loginInFlight = false;
-        std::atomic<long long> loginStartedAt = 0;
         std::atomic<bool> needsRelogin = false;
         std::string cachedGameVersion;
 
-        constexpr long long LOGIN_STALL_SECONDS = 120;
+        std::mutex refreshMutex;
+        std::vector<std::function<void(bool)>> refreshWaiters;
 
         long long NowUnix()
         {
@@ -289,6 +288,8 @@ namespace AccSaberQLite::API
                                     : 0;
             sessionExpiresAtUnix = expiresIn > 0 ? NowUnix() + expiresIn - 60 : 0;
 
+            getModConfig().AccessToken.SetValue(sessionAccessToken, false);
+            getModConfig().AccessExpiresAt.SetValue(static_cast<int>(sessionExpiresAtUnix), false);
             getModConfig().RefreshToken.SetValue(sessionRefreshToken);
             needsRelogin = false;
             return true;
@@ -314,8 +315,25 @@ namespace AccSaberQLite::API
                     });
         }
 
+        void FinishRefresh(bool ok)
+        {
+            std::vector<std::function<void(bool)>> waiters;
+            {
+                std::lock_guard lock(refreshMutex);
+                waiters.swap(refreshWaiters);
+            }
+            for (auto &waiter : waiters)
+                waiter(ok);
+        }
+
         void RefreshSession(std::function<void(bool)> onDone)
         {
+            {
+                std::lock_guard lock(refreshMutex);
+                refreshWaiters.push_back(std::move(onDone));
+                if (refreshWaiters.size() > 1)
+                    return;
+            }
             std::string refreshToken;
             {
                 std::lock_guard lock(sessionMutex);
@@ -323,17 +341,27 @@ namespace AccSaberQLite::API
             }
             if (refreshToken.empty())
                 refreshToken = getModConfig().RefreshToken.GetValue();
-            if (refreshToken.empty())
+            if (refreshToken.empty() || needsRelogin)
             {
-                onDone(false);
+                FinishRefresh(false);
                 return;
             }
 
             AuthRequest("/auth/refresh", "{\"refreshToken\":" + JsonEscape(refreshToken) + "}",
-                        "Session refresh", [onDone = std::move(onDone)](bool ok, long httpCode)
+                        "Session refresh", [](bool ok, long httpCode)
                         {
-                if (!ok && httpCode >= 400 && httpCode < 500) needsRelogin = true;
-                onDone(ok); });
+                if (!ok && httpCode >= 400 && httpCode < 500 && httpCode != 429) needsRelogin = true;
+                FinishRefresh(ok); });
+        }
+
+        void LoadStoredSession(std::string const &refreshToken)
+        {
+            std::lock_guard lock(sessionMutex);
+            sessionRefreshToken = refreshToken;
+            if (!sessionAccessToken.empty())
+                return;
+            sessionAccessToken = getModConfig().AccessToken.GetValue();
+            sessionExpiresAtUnix = getModConfig().AccessExpiresAt.GetValue();
         }
 
         std::string TrimCopy(std::string value)
@@ -358,10 +386,13 @@ namespace AccSaberQLite::API
             if (token.empty())
                 return;
 
+            getModConfig().AccessToken.SetValue("", false);
             getModConfig().RefreshToken.SetValue(token);
             {
                 std::lock_guard lock(sessionMutex);
                 sessionRefreshToken = token;
+                sessionAccessToken.clear();
+                sessionExpiresAtUnix = 0;
             }
             needsRelogin = false;
             PaperLogger.info("Imported baked session credential from installer");
@@ -432,6 +463,10 @@ namespace AccSaberQLite::API
                                             {
                         if (ok) {
                             AttemptSubmit(payload, attemptsLeft, true, onDone);
+                        } else if (!needsRelogin && attemptsLeft > 0) {
+                            PaperLogger.warn("Session refresh unavailable, retrying ({} attempts left)", attemptsLeft);
+                            std::this_thread::sleep_for(std::chrono::seconds(5));
+                            AttemptSubmit(payload, attemptsLeft - 1, false, onDone);
                         } else {
                             PaperLogger.error("Submit aborted: no valid session, re-login queued");
                             onDone(false);
@@ -480,30 +515,23 @@ namespace AccSaberQLite::API
         {
             cachedGameVersion = static_cast<std::string>(UnityEngine::Application::get_version());
         }
+        ImportSessionFileIfPresent();
         if (HasSession())
             return;
-        if (loginInFlight && NowUnix() - loginStartedAt < LOGIN_STALL_SECONDS)
-            return;
-
-        ImportSessionFileIfPresent();
 
         std::string storedRefresh = getModConfig().RefreshToken.GetValue();
-        if (!storedRefresh.empty() && !needsRelogin)
+        if (storedRefresh.empty() || needsRelogin)
         {
-            {
-                std::lock_guard lock(sessionMutex);
-                sessionRefreshToken = storedRefresh;
-            }
-            loginInFlight = true;
-            loginStartedAt = NowUnix();
-            RefreshSession([](bool ok)
-                           {
-                loginInFlight = false;
-                if (!ok) PaperLogger.warn("Stored session invalid; download a fresh personalized mod from accsaber.com/quest to relink"); });
+            PaperLogger.warn("Not linked to an account in AccSaber. Download a personalized mod from accsaber.com/quest.");
             return;
         }
 
-        PaperLogger.warn("Not linked to an account in AccSaber. Download a personalized mod from accsaber.com/quest.");
+        LoadStoredSession(storedRefresh);
+        if (HasSession())
+            return;
+        RefreshSession([](bool ok)
+                       {
+            if (!ok && needsRelogin) PaperLogger.warn("Stored session invalid; download a fresh personalized mod from accsaber.com/quest to relink"); });
     }
 
     void SubmitScore(ScorePayload payload, std::function<void(bool)> onDone)
