@@ -7,4 +7,5 @@ DECLARE_CONFIG(ModConfig) {
     CONFIG_VALUE(AccessToken, std::string, "accessToken", "");
     CONFIG_VALUE(AccessExpiresAt, int, "accessExpiresAt", 0);
     CONFIG_VALUE(InstallationId, std::string, "installationId", "");
+    CONFIG_VALUE(ImportedSessionToken, std::string, "importedSessionToken", "");
 };

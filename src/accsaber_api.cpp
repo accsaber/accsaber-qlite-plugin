@@ -380,12 +380,12 @@ namespace AccSaberQLite::API
                 return;
             std::string token((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             file.close();
-            std::remove(SESSION_FILE);
 
             token = TrimCopy(std::move(token));
-            if (token.empty())
+            if (token.empty() || token == getModConfig().ImportedSessionToken.GetValue())
                 return;
 
+            getModConfig().ImportedSessionToken.SetValue(token, false);
             getModConfig().AccessToken.SetValue("", false);
             getModConfig().RefreshToken.SetValue(token);
             {
